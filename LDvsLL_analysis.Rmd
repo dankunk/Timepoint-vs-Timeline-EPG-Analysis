@@ -1,0 +1,232 @@
+---
+title: "LD vs LL Analysis (8h and 24h EPG recordings)"
+author: "Daniel Kunk"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# LD-LL and 24h EPG Analysis
+
+This document will analyze EPG data that was collected for 8 hour duration over three time points (ZT/CT0, 8 and 16) in both LD and LL conditions (16:8 light:dark or 24h light). Additionally, we will analyze data that was collected at one time point continuously for 24 hours between LD and LL conditions.
+
+## 1. Install any necessary packages.
+
+First, we will install any necessary packages. These will be stored in our R-project virtual environment. This means that someone with this repository/R-project should be able to re-produce our analysis exactly. First we will install the tidyverse which should handle most of our needs. In addition we can install the EPGplotR package which will allow us to create some beautiful plots of our EPG signals.
+
+Remember, you may not need to do this, since I am installing these in an R-project R virtual environment. As long as you have this repository you should be good. You can always look in your console for the `Project 'C:/Users/danie/OneDrive - Colostate/NALAM LAB/Authored Papers/DK_Aphid_Feeding_2026/R_scripts/LDvsLL_24h_EPG_2026' loaded. [renv 1.1.5]` line showing that you are in the right place and the renv is loaded up. Just load a package with `library(tidyverse)` and if it load you should be all good!
+
+```{r}
+# We only need a few packages.
+
+# install tidyverse
+### install.packages("tidyverse")
+
+
+# now to install discoEPG we need to install some more stuff!
+# devtools and pak package allows us to install from source code on github.
+# (devtools isnt required feel free to remove here)
+# It installs missing one dependency so we can install that after.
+### install.packages("pak")
+### install.packages("gtools")
+library(pak)
+
+# use pak to install from source, make sure you have rtools installed (rtools45)
+### pak("dankunk/EPGplotR")
+
+# check to see if EPGplotR is installed.
+library(EPGplotR)
+
+# Now lets install some packages for non-parametric two-way anova
+install.packages("ARTool")
+
+# some additional packages useful for modelling in R
+### install.packages("tidyr")
+### install.packages("emmeans")
+```
+
+## 2. Begin the Analysis
+
+Now that we have some packages installed we can start to do our analysis. First lets plan out what we want to do in steps.
+
+### A. Analyze LD and LL - 8h EPG data:
+
+1.  Perform statistics between time points (within light-treatment) and between light-treatment within time points and generate formatted/documented output tables for suitable for publication.
+
+2.  Generate figures with statistics over each bar/box/etc. for the comparisons in question for the major EPG variables.
+
+3.  Generate summary figures with discoEPG plots and GLM plots to summarize behavior over the feeding windows.
+
+### B. Analyze LD and LL - 24h EPG data:
+
+1.  Perform Statistics between LD and LL recordings.
+
+2.  Generate figures with statistics for the comparisons in question for major EPG variables.
+
+3.  Generate figures of the 24h signal for each recording and fit into a large multi-panel plot (1 column, n rows) that will be contained in the supplementary figures.
+
+## 3. Lets start with the 8h LD and LL data analysis.
+
+### A. To start lets load, format, and explore the data:
+
+```{r}
+library(tidyverse)
+
+# load the data and add a light treatment column
+
+LD_8h = read.csv("./data/LD_ShinyAppParameterDataExport_2026-04-07 20_03_26.csv") %>% mutate(light = "LD")
+
+LL_8h = read.csv("./data/LL_ShinyAppParameterDataExport_2026-04-07 20_06_57.csv") %>% mutate(light = "LL")
+
+
+# Join the two data frames on top of one another
+LD_LL_8h = rbind(LD_8h, LL_8h)
+
+# we have some inf and NA values that we will drop for now.
+LD_LL_8h = LD_LL_8h %>%
+  filter(is.finite(value))
+
+# the natural tendency of R is to sort by first number so ZT16 comes before 8.
+# Our treatment variable (ZT) has a natural order so lets set that.
+LD_LL_8h$treatment = factor(LD_LL_8h$treatment, levels = c("ZT0", "ZT8", "ZT16"), ordered = T)
+
+# Downstream modeling likes our variables to be factors so we should set light as well
+LD_LL_8h$light = factor(LD_LL_8h$light, levels = c("LD","LL"), ordered = F)
+
+
+```
+
+-   Now some slight EDA before hypothesis testing:
+
+```{r}
+# if you are interested in the dataset we can see:
+summary(LD_LL_8h)
+
+# file name: the epg recording analysis file
+# value: the value of the variable
+# description: semantic name of variable
+# acronym: acronym of variable
+# treatment: time of recording start (ZT)
+# light: light regime (LD or LL)
+
+# furthermore glimpse the data
+head(LD_LL_8h)
+
+# now lets check each the mean and std dev of every variable across all ind.
+LD_LL_8h %>%
+  group_by(description) %>%
+  # Now you can safely run means or hypothesis tests
+    summarise(
+      mean = mean(value),
+      stddev = sd(value),
+      min = min(value),
+      max = max(value),
+      q25 = quantile(value, 0.25),
+      median = quantile(value, 0.50), # or median(value)
+      q75 = quantile(value, 0.75),
+      n = n(),
+      .groups = "drop"
+    )
+
+# We can also check the mean and std per treatments by grouping!
+LD_LL_8h %>%
+  group_by(description, treatment, light) %>%
+  # Now you can safely run means or hypothesis tests
+    summarise(
+      mean = mean(value),
+      stddev = sd(value),
+      min = min(value),
+      max = max(value),
+      q25 = quantile(value, 0.25),
+      median = quantile(value, 0.50), # or median(value)
+      q75 = quantile(value, 0.75),
+      n = n(),
+      .groups = "drop"
+    )
+```
+
+-   Now that we have an idea about the centrality and variance of our data, we should talk about our hypotheses. Because this is a general or exploratory experiment our hypothesis is rather general.
+
+$$H_0: \text{The means of behaviors are identical across Light and ZT groups.}$$
+
+$$and$$
+
+$$H_A: \text{At least one group mean differs significantly.}$$
+
+-   Usually, a two-way anova would do the trick here but lets check out our data:
+
+```{r}
+# say for this variable, Duration of C, how is the data distributed across all individuals
+LD_LL_8h %>%
+  filter(description == "Total duration of C") %>%
+  ggplot(aes(x = value, fill = treatment)) + 
+  geom_histogram(
+    alpha = 0.25,
+    bins = 20,
+    color = "black"
+  ) +
+  labs(x = "duration (s)") +
+  facet_wrap(. ~ light, nrow = 3)
+
+# what if its normally distributed?
+LD_LL_8h %>%
+  filter(description == "Total duration of C") %>%
+  ggplot(aes(x = log10(value), fill = treatment)) + 
+  geom_histogram(
+    alpha = 0.25,
+    bins = 20,
+    color = "black"
+  ) +
+  labs(x = "Log10 duration (s)") +
+  facet_wrap(. ~ light, nrow = 3)
+# looks better 
+
+```
+
+-   We can see that our data doesn't even fit a normal distribution, it is right-Skewed. Further, we could do more tests to see if it was parametric (qq-plot, variance, shaprio test, etc.), but from experience I know that this data will mostly be non-parametric.
+
+-   This means that we need to use a non-parametric two-way anova. Also known as a Aligned Rank Transformed two-way anova (ART).
+
+### B. Now we can do our hypothesis testing:
+
+Here we will use the ARTool package in addition to emmeans.
+
+```{r}
+# load aligned rank transform package
+library(ARTool)
+library(emmeans)
+
+# grab temmeans# grab test df of 1 variable.
+df_durC = LD_LL_8h %>% 
+  filter(description == "Total duration of C")
+
+# model the duration value as a function of treatment, light, and their interaction.
+m.art = art(value ~ treatment*light, data = df_durC)
+
+# peek at the model
+m.art
+
+# analysis of variance
+anova(m.art)
+
+# conducting contrasts
+art.con(m.art, "treatment")
+art.con(m.art, "light")
+
+# contrasts
+art.con(m.art, "treatment:light")
+```
+
+
+
+
+
+### C. Now we can do some plotting:
+
+```{r}
+
+
+
+```
+
