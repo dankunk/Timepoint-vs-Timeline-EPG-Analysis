@@ -3,5 +3,5 @@
 .RData
 .Ruserdata
 .positai
-figures_24h/*.svg
-figures_8h/*.svg
+figures_24h/**/*.svg
+figures_8h/**/*.svg
