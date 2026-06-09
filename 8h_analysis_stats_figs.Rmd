@@ -1,0 +1,871 @@
+---
+title: "8h EPG Data Analysis and Figures"
+author: "Daniel Kunk"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# 1. Load the data
+
+Here we can load the two datasets, format them, and perform some summary statistics.
+
+```{r}
+library(dplyr)
+# load the data and add a light treatment column
+
+LD_8h = read.csv(
+  "./data/LD_ShinyAppParameterDataExport_2026-04-07 20_03_26.csv") %>% 
+  mutate(light = "LD")
+
+LL_8h = read.csv(
+  "./data/LL_ShinyAppParameterDataExport_2026-04-07 20_06_57.csv") %>% 
+  mutate(light = "LL")
+
+# join the two dataframes into one
+LD_LL_8h = rbind(LD_8h, LL_8h)
+
+# clean memory
+rm(LD_8h, LL_8h)
+
+# factorize treat
+LD_LL_8h$treatment = factor(LD_LL_8h$treatment, 
+                            levels = c("ZT0", "ZT8", "ZT16"), 
+                            ordered = F)
+
+# and light
+LD_LL_8h$light = factor(LD_LL_8h$light, 
+                        levels = c("LD","LL"), 
+                        ordered = F)
+```
+
+We can make a named vector of the variables that we care about.
+
+```{r}
+# load a vector of target variables for future use. 
+target_variables = c(
+  "Total duration of np" = "h",
+  "Total duration of pd" = "min",
+  "Total duration of C"  = "h",
+  "Total duration of E1" = "h",
+  "Total duration of E2" = "h",
+  "Total duration of F"  = "min",
+  "Duration of G"        = "h",
+  "Number of np"         = "count",
+  "Number of pd"         = "count",
+  "Number of C"          = "count",
+  "Number of E1"         = "count",
+  "Number of E2"         = "count",
+  "Number of F"          = "count",
+  "Number of G"          = "count"
+)
+```
+
+Some slight EDA.
+
+```{r}
+library(ggplot2)
+library(ggridges)
+# univariate histograms for all target variables
+# first grabbing a small target dataset
+target_data = LD_LL_8h %>%
+  filter(description %in% names(target_variables)) %>%
+  mutate(value = as.numeric(value))
+
+# plotting all histograms at once using facet_wrap
+ggplot(target_data, aes(x = value, fill = treatment)) +
+  geom_histogram(bins = 30, color = "black", alpha = 0.5) +
+  theme_classic() +
+  facet_wrap(vars(description, light), scales = "free") + 
+  labs(
+    x = "Value",
+    y = "Frequency"
+  ) +
+  theme(legend.position = "none")
+
+# using a ridges geom as it looks a bit better than overlapped histograms.
+ggplot(target_data, aes(x = value, y = treatment, fill = treatment)) +
+  geom_density_ridges(alpha = 0.5, color = "black", scale = 1.5) +
+  theme_classic() +
+  facet_wrap(vars(description, light), scales = "free") + 
+  labs(
+    x = "Value",
+    y = "Treatment" 
+  ) +
+  theme(legend.position = "none")
+```
+
+Some more EDA to get summary statistics on the data
+
+```{r}
+# using both light and treatment
+summary_8h = LD_LL_8h %>%
+  filter(description %in% names(target_variables)) %>%
+  group_by(description, treatment, light) %>%
+  summarise(
+    max = max(value),
+    min = min(value),
+    n = n(),
+    mean = mean(value),
+    sd = sd(value),
+    median = median(value),
+    mode = DescTools::Mode(value)[1],
+    .groups = "drop_last"
+  )
+
+# write to csv for supp data
+      #write.csv(summary_8h, file = "./suppData/8h_EPG-SummaryStatistics")
+
+```
+
+We can see that there are lots of zeros for the count data. We can also see the mode for the count data. For the duration data we can see that the only zeros are found in G and F which makes sense. We can also see that the modes for the duration data except for F are all NA, this is because most of these numbers are unique and there isn't any most frequent number.
+
+With this knowledge we know that a gamma distribution will work for most of the duration variables except for F and G, in these cases we could use a hurdle model or better yet a tweedie model. For the count data, we can likely get by with a negative binomial distribution for all of our variables.
+
+In E1 and E2, for LD - ZT0, we can see that there is at least one recording with a 0 value (min). I believe this was an aphid that remained dedicated in the pathway phase for a long duration of time. Since there was nothing technically wrong with this aphid, it was allowed to remain in the dataset since it is a true, observed behavior albeit an interesting/weird one. For these two behaviors we should maybe utilize a different model or add a small constant to the zeros.
+
+Similar to the previous analysis. It's important to check and see if these models fit well. We can pick a few variables to analyze.
+
+We should see how the fit is with the E1 and E2 duration when adding the constant and see if a different model (other than gamma glm) makes more sense.
+
+Small sandbox to do some initial modeling
+
+```{r}
+# small modelling sandbox
+# load required modeling and diagnostic packages
+library(dplyr)
+library(MASS)
+# for diagnostics
+library(DHARMa)
+# type 3 anova
+library(car)
+# pairwise comps
+library(emmeans)
+# for the tweedie model to work with dharma use glmmTMB...
+library(glmmTMB)
+
+# prep the data 
+sandbox_data = LD_LL_8h %>%
+  filter(description %in% names(target_variables)) %>%
+  mutate(value = as.numeric(value))
+
+# since this is a dataset with more than two variables
+# and we want to do type III anovas
+# we want to set sum contrast rather than treatment contrasts
+# this is since there isnt a clear baseline
+options(contrasts = c("contr.sum", "contr.poly"))
+
+# 1. gamma model (all durations > 0)
+# "Total duration of C"
+data_tot_dur_c = sandbox_data %>% filter(description == "Total duration of C")
+
+# fit gamma with log link. including an interaction
+m_gamma_durC = glm(value ~ treatment * light, family = Gamma(link = "log"),
+              data = data_tot_dur_c)
+
+# evaluate gamma Model
+print(summary(m_gamma_durC), show.residuals = TRUE)
+
+# base diagnostics
+par(mfrow = c(2,2))
+plot(m_gamma_durC, main = "gamma: Duration of C")
+
+# reset plot window to default
+par(mfrow = c(1,1))
+
+# DHARMa 
+res_gamma = simulateResiduals(fittedModel = m_gamma_durC, plot = TRUE)
+
+# type III anova from car package
+anova_durC = Anova(m_gamma_durC, type = "III")
+print(anova_durC)
+
+# pariwise comps with FDR adjustment
+emmeans(m_gamma_durC, 
+        pairwise ~ treatment:light, 
+        type = "response", adjust = "fdr")
+
+# calculate the estimated marginal means (EMMs) for the interaction
+# type = "response" back-transforms the log link so estimates are in real -
+# duration units
+emm_durC = emmeans(m_gamma_durC, ~ treatment * light, type = "response",
+                   adjust = "fdr")
+
+# comp A: compare ZT treatments within each light condition
+# this answers: "Is there a significant rhythm/difference across timepoints - 
+# under LD? What about under LL?"
+pairs_within_light = pairs(emm_durC, simple = "treatment", adjust = "fdr")
+print(pairs_within_light)
+
+# comp B: compare LD vs LL within each specific ZT timepoint
+# this answers: "At ZT8 specifically, does the lighting condition change -
+# the feeding duration?"
+pairs_within_trt = pairs(emm_durC, simple = "light", adjust = "fdr")
+print(pairs_within_trt)
+
+# we can see in the Anova, that the interaction is the only thing showing any -
+# p-value less than the significance threshold of 0.05.
+# 
+# further, when we do emmeans pairwise across all combos, with FDR correction,-
+#nothing is significant but a few at ~ 0.08.
+# 
+# then, when we simply ask are there differences in means between the -
+# individual treatments of light and time, we can see some significant -
+#differences.
+# 
+# now lets try a NB, a tweedie, and see what models give us good fits for -
+# the E1/E2 durations that only have a few zeros.
+
+# cleanup
+rm(res_gamma, pairs_within_light, 
+   pairs_within_trt, m_gamma_durC, 
+   emm_durC, data_tot_dur_c, anova_durC)
+
+
+
+# 2. tweedie (durations with exact 0s)
+# "Total duration of F"
+
+data_tweedie_durF = sandbox_data %>% filter(description == "Total duration of F")
+
+#
+options(contrasts = c("contr.sum", "contr.poly"))
+
+# fit tweedie model
+m_tweedie_durF = glmmTMB(value ~ treatment * light, 
+                        family = tweedie(link = "log"), 
+                        data = data_tweedie_durF)
+
+# eval tweedie Model
+print(summary(m_tweedie_durF), show.residuals = TRUE)
+
+# DHARMa
+res_tweedie = simulateResiduals(fittedModel = m_tweedie_durF, plot = TRUE)
+
+# ANOVA
+anova_durF = Anova(m_tweedie_durF, type = "III")
+print(anova_durF)
+
+# no significant effects in treatment, light or the interaction for this -
+# behavior. No need for pairwise comps.
+
+# clean up
+rm(anova_durF, data_tweedie_durF, m_tweedie_durF, res_tweedie)
+
+
+
+
+# 3. neg binom (for 0 counts)
+# "Number of C"
+
+data_negbin_numC = sandbox_data %>% filter(description == "Number of C")
+
+# fit negative binomial
+m_negbin_numC = glm.nb(value ~ treatment*light, data = data_negbin_numC)
+
+# eval nb model
+print(summary(m_negbin_numC), show.residuals = TRUE)
+
+# base diagnostics
+par(mfrow = c(2,2))
+plot(m_negbin_numC, main = "NegBin: Number of C")
+
+# reset plot window to default
+par(mfrow = c(1,1))
+
+# DHARMa
+res_negbin = simulateResiduals(fittedModel = m_negbin_numC, plot = TRUE)
+
+# run anova
+anova_numC = Anova(m_negbin_numC, type = "III")
+print(anova_numC)
+
+# pariwise comps with FDR adjustment
+emmeans(m_negbin_numC, 
+        pairwise ~ treatment:light, 
+        type = "response", adjust = "fdr")
+
+# calculate the estimated marginal means (EMMs) for the interaction
+# type = "response" back-transforms the log link so estimates are in real -
+# duration units
+emm_numC = emmeans(m_negbin_numC, ~ treatment * light, type = "response",
+                   adjust = "fdr")
+
+# comp A: compare ZT treatments within each light condition
+# this answers: "Is there a significant rhythm/difference across timepoints - 
+# under LD? What about under LL?"
+pairs_within_light_numC = pairs(emm_numC, simple = "treatment", adjust = "fdr")
+print(pairs_within_light_numC)
+
+# comp B: compare LD vs LL within each specific ZT timepoint
+# this answers: "At ZT8 specifically, does the lighting condition change -
+# the feeding duration?"
+pairs_within_trt_numC = pairs(emm_numC, simple = "light", adjust = "fdr")
+print(pairs_within_trt_numC)
+
+# great we can see that everything worked well...
+# now we can peek at the durE1 and E2 variables to see if gamma will work...
+
+# clean up
+rm(data_negbin_numC,
+  m_negbin_numC,
+  res_negbin,
+  anova_numC,
+  emm_numC,
+  pairs_within_light_numC,
+  pairs_within_trt_numC)
+
+
+
+# 4. Starting with dur E1
+# "Total duration of E1"
+data_tot_dur_e1 = sandbox_data %>% 
+  filter(description == "Total duration of E1")
+
+# fit gamma with log link. including an interaction
+# tweedie will push var closer to 2?
+m_tweedie_durE1 = glmmTMB(value ~ treatment * light, 
+                          family = tweedie(link = "log"), 
+                          data = data_tot_dur_e1)
+
+# summarize model
+print(summary(m_tweedie_durE1), show.residuals = TRUE)
+
+
+# dharma
+res_tweedie_durE1 = simulateResiduals(fittedModel = m_tweedie_durE1, 
+                                      plot = TRUE)
+
+# anova
+anova_durE1 = Anova(m_tweedie_durE1, type = "III")
+print(anova_durE1)
+# no sig differences in anova can move on to E2. Tweedie likely best.
+# cleanup
+rm(data_tot_dur_e1,
+  m_tweedie_durE1,
+  res_tweedie_durE1,
+  anova_durE1)
+
+
+
+
+
+# 5. Starting with dur E2
+# "Total duration of E2"
+data_tot_dur_E2 = sandbox_data %>% 
+  filter(description == "Total duration of E2")
+
+# fit gamma with log link. including an interaction
+# tweedie will push var closer to 2?
+m_tweedie_durE2 = glmmTMB(value ~ treatment * light, 
+                          family = tweedie(link = "log"), 
+                          data = data_tot_dur_E2)
+
+# summarize model
+print(summary(m_tweedie_durE2), show.residuals = TRUE)
+
+
+# dharma
+res_tweedie_durE2 = simulateResiduals(fittedModel = m_tweedie_durE2, 
+                                      plot = TRUE)
+
+# anova
+anova_durE2 = Anova(m_tweedie_durE2, type = "III")
+print(anova_durE2)
+
+# we see a sig diff in the interaction. Lets run emmeans.
+
+# pairwise comps with FDR adjustment
+emmeans(m_tweedie_durE2, 
+        pairwise ~ treatment:light, 
+        type = "response", adjust = "fdr")
+
+# calculate the estimated marginal means (EMMs) for the interaction
+# type = "response" back-transforms the log link so estimates are in real -
+# duration units
+emm_durE2 = emmeans(m_tweedie_durE2, ~ treatment * light, type = "response",
+                   adjust = "fdr")
+
+# comp A: compare ZT treatments within each light condition
+# this answers: "Is there a significant rhythm/difference across time points - 
+# under LD? What about under LL?"
+pairs_within_light_durE2 = pairs(emm_durE2, simple = "treatment", adjust = "fdr")
+print(pairs_within_light_durE2)
+
+# comp B: compare LD vs LL within each specific ZT time point
+# this answers: "At ZT8 specifically, does the lighting condition change -
+# the feeding duration?"
+pairs_within_trt_durE2 = pairs(emm_durE2, simple = "light", adjust = "fdr")
+print(pairs_within_trt_durE2)
+
+# we have a failed KS test which is suggesting that the data doesn't perfectly -
+# fit the distribution at hand. Everything else is good though. I think this -
+# will be adequate. 
+
+```
+
+We can see that for this stuff the same applies as the 24 h data. Gamma for all the duration, except for F, G, E1, and E2 where we can do a Tweedie model due to zeros, and negative binomial for all of the counts!
+
+# 2. Do GLM modelling and make plots.
+
+Now we want these stats for all of our target variables and create plots that are overlaying the significant statistics onto the plot.
+
+```{r}
+# load libraries if not already
+library(ggplot2)
+library(dplyr)
+# for models
+# neg binom
+library(MASS)
+# type 3 anova
+library(car)       
+# tweedie models w/ anova + dharma support
+library(glmmTMB)   
+# pairwise comparisons
+library(emmeans)   
+# pretty plots for pub.
+library(ggprism)
+
+# make sure to set sum contrasts since we are using type III anovas...
+options(contrasts = c("contr.sum", "contr.poly"))
+
+# grab the data if haven't already
+target_data = LD_LL_8h %>%
+  filter(description %in% names(target_variables)) %>%
+  mutate(value = as.numeric(value))
+
+# make the empty list for the plots
+boxplot_list_8h = list()
+
+# start looping through the EPG variable
+for (var in names(target_variables)) {
+  
+  # grab units from target variables vector at each level of var
+  unit = target_variables[[var]]
+  # grab data for each level of var
+  plot_data = target_data %>% filter(description == var)
+  
+  # start unit conversion logic
+  if (unit == "h") {
+    plot_data$value = plot_data$value / 3600
+    y_label = paste(var, "(hr)")
+  } else if (unit == "min") {
+    plot_data$value = plot_data$value / 60
+    y_label = paste(var, "(min)")
+  } else if (unit == "sec") {
+    y_label = paste(var, "(sec)")
+  } else {
+    y_label = paste(var)
+  }
+  
+  # build the base plot 
+  p = ggplot(plot_data, aes(x = treatment, y = value, fill = light)) +
+    geom_violin(position = position_dodge(1), alpha = 1, color = NA) + 
+    geom_boxplot(width = 0.5, color = "grey10", outlier.shape = NA, 
+                 position = position_dodge(1), alpha = 0.5) +
+    geom_point(aes(shape = light), 
+               position = position_jitterdodge(dodge.width = 1, jitter.width = 0.5),
+               color = "black", alpha = 0.5) +
+    scale_shape_manual(
+      values = c("LD" = 21, "LL" = 22) 
+    ) +
+    scale_fill_manual(values = c("LD" = "#0077BB", "LL" = "#EE7733")) +
+    guides(fill = guide_legend(position = "inside"),
+             shape = guide_legend(position = "inside")) +
+    theme_prism() +
+    theme(legend.position.inside = c(.95, .95)) +
+    labs(x = "Zeitgeber Time", y = y_label, fill = "Light Regime", shape = "Light Regime")
+  
+  tryCatch({
+    # 1. neg binom for all count data
+    if (unit == "count") {
+      mod = glm.nb(value ~ treatment * light, data = plot_data)
+      
+    # 2. glmmTMB Tweedie for specific zero-inflated durations
+    } else if (var %in% c("Total duration of F", "Duration of G", 
+                          "Total duration of E1", "Total duration of E2")) {
+      mod = glmmTMB(value ~ treatment * light, family = tweedie(link = "log"), 
+                    data = plot_data)
+      
+    # 3. gamma for all other duration vars
+    } else {
+      mod = glm(value ~ treatment * light, family = Gamma(link = "log"), 
+                data = plot_data)
+    }
+    
+    # run type 3 anova to check global significance
+    aov_res = Anova(mod, type = "III")
+    p_col = grep("Pr", colnames(aov_res), value = TRUE)[1]
+    
+    p_trt = ifelse("treatment" %in% rownames(aov_res), 
+                   aov_res["treatment", p_col], NA)
+    p_lgt = ifelse("light" %in% rownames(aov_res), 
+                   aov_res["light", p_col], NA)
+    p_int = ifelse("treatment:light" %in% rownames(aov_res), 
+                   aov_res["treatment:light", p_col], NA)
+    
+    # only proceed with post-hoc brackets if ANY main effect or interaction is significant
+    if (any(c(p_trt, p_lgt, p_int) < 0.05, na.rm = TRUE)) {
+      
+      # run emmeans for the interaction
+      emm = emmeans(mod, ~ treatment * light, type = "response", 
+                    adjust = "fdr")
+      
+      # extract pairwise dataframes
+      pairs_lgt = as.data.frame(pairs(emm, simple = "light", 
+                                      adjust = "fdr")) %>% 
+        filter(p.value < 0.05)
+      
+      pairs_trt = as.data.frame(pairs(emm, simple = "treatment", 
+                                      adjust = "fdr")) %>% 
+        filter(p.value < 0.05)
+      
+      # initialize dynamic Y tracker for staggering brackets across comps
+      max_y = max(plot_data$value, na.rm = TRUE)
+      current_y = max_y + (max_y * 0.05)
+      step_y = max_y * 0.08
+      
+      #  plotting Comparisons within ZT (LD vs LL) 
+      if (nrow(pairs_lgt) > 0) {
+        for (i in 1:nrow(pairs_lgt)) {
+          row = pairs_lgt[i, ]
+          
+          # find X coordinates (dodged offset ~ 0.2 around integer center)
+          x_center = match(as.character(row$treatment), 
+                           levels(plot_data$treatment))
+          x1 = x_center - 0.2  # LD
+          x2 = x_center + 0.2  # LL
+          
+          # set asterisks
+          sig_stars = case_when(row$p.value < 0.001 ~ "***",
+                                row$p.value < 0.01  ~ "**",
+                                row$p.value < 0.05  ~ "*")
+          # annotate plot with the brackets and text
+          p = p + 
+            annotate("segment", x = x1, xend = x2, y = current_y, 
+                     yend = current_y, linewidth = 0.5) +
+            annotate("text", x = x_center, y = current_y + (max_y * 0.02), 
+                     label = sig_stars, size = 5, fontface = "bold")
+          
+          current_y = current_y + step_y
+        }
+      }
+      
+      # plotting comparisons within light treat (e.g. ZT0 vs ZT8)
+      if (nrow(pairs_trt) > 0) {
+        for (i in 1:nrow(pairs_trt)) {
+          row = pairs_trt[i, ]
+          
+          # set X offset based on light regime
+          offset = ifelse(as.character(row$light) == "LD", -0.2, 0.2)
+          
+          # parse contrast string (e.g., "ZT0 - ZT8" or "ZT0 / ZT8" depending on link function)
+          zts = unlist(strsplit(as.character(row$contrast), "\\s+[-/]\\s+"))
+          zts = gsub("[()]", "", zts) # clean parens if emmeans added them
+          
+          x1 = match(trimws(zts[1]), levels(plot_data$treatment)) + offset
+          x2 = match(trimws(zts[2]), levels(plot_data$treatment)) + offset
+          
+          sig_stars = case_when(row$p.value < 0.001 ~ "***",
+                                row$p.value < 0.01  ~ "**",
+                                row$p.value < 0.05  ~ "*")
+          # add annotations
+          p = p + 
+            annotate("segment", x = x1, xend = x2, y = current_y, 
+                     yend = current_y, linewidth = 0.5) +
+            annotate("text", x = mean(c(x1, x2)), 
+                     y = current_y + (max_y * 0.02), 
+                     label = sig_stars, size = 6, fontface = "bold")
+          
+          current_y = current_y + step_y
+        }
+      }
+      
+      # final coordinate expansion based on all drawn brackets
+      p = p + coord_cartesian(ylim = c(0, current_y + (max_y * 0.05)))
+    }
+    # debug
+  }, error = function(e) {
+    p <<- p + labs(subtitle = "Model failed to converge/evaluate")
+  })
+  
+  # store the plot to list and then print
+  boxplot_list_8h[[var]] = p
+  print(p)
+}
+```
+
+Save to svg looping through list...
+
+```{r}
+# global width and height
+plot_width = 5
+plot_height = 5
+
+
+# loop through the list and save each plot
+for (var_name in names(boxplot_list_8h)) {
+  
+  # clean up the name for the file system
+  safe_name = gsub(" ", "_", var_name)
+  file_path = paste0("./figures_8h/boxplots/", safe_name, ".svg")
+  
+  # save as svg
+  # ggsave(
+  #   filename = file_path,
+  #   plot = boxplot_list_8h[[var_name]],
+  #   width = plot_width, 
+  #   height = plot_height,
+  #   device = "svg"
+  # )
+  
+  print(paste("Saved plot:", file_path))
+}
+```
+
+Now we can create some multi-plots that contain duration of C, duration of E1, duration of E2, number of E1.
+
+These should be pub. ready.
+
+```{r}
+library(patchwork)
+
+# define grouping vars
+specific_vars = c("Total duration of C", "Total duration of E1", "Total duration of E2", "Number of E1")
+
+# debug
+available_vars = intersect(specific_vars, names(boxplot_list_8h))
+
+
+# start
+if (length(available_vars) > 0) {
+  
+  # extract the plots into a sublist
+  multi_plots = boxplot_list_8h[available_vars]
+  
+  # combine  using patchwork syntax
+  # wrap_plots takes a list of plots and builds a grid
+  combined_plot_1 = wrap_plots(multi_plots, ncol = 2) + 
+    plot_layout(guides = "collect", # one legend
+                axis_titles = "collect_x") &  # one axis
+    theme(legend.position = "none") &      # dropping for prettier, wide plots, save with this argument off and copy over using inkscape
+    guides(fill = guide_legend(nrow = 1, byrow = TRUE),
+      shape = guide_legend(nrow = 1, byrow = TRUE)) &
+    plot_annotation(tag_levels = 'A')
+  
+  # ggsave(
+  #   filename = "./figures_8h/multiplots/variables_durations_and_counts_8h_nolegend.svg",
+  #   plot = combined_plot_1,
+  #   width = 9,      # Scaled up for 2x2 panel
+  #   height = 8,
+  #   device = "svg"
+  # )
+  print(combined_plot_1)
+  print("Saved Multiplot 1 successfully!")
+}
+```
+
+# 3. EPG Summary Plots
+
+We can create the EPG summary plots. We want to create multi-panel plots. Ideally we want these faceted by LD and LL rows with columns for treatment (ZT time). We can try the other way to check if it looks better.
+
+Below we can grab the data and format it accordingly.
+
+```{r}
+# discoEPG and patchwork
+library(discoEPG)
+library(patchwork)
+library(ggprism)
+# labels
+waveform_labels = c("np" = 1,
+                    "C" = 2,
+                    "E1e" = 3,
+                    "E1" = 4,
+                    "E2" = 5,
+                    "F" = 6,
+                    "G" = 7,
+                    "pd" = 8,
+                    "end" = 12)
+
+
+# pass EPG dir for ana
+ana_dir_LD = "../EPG_data/8h_data/LD/LD_all_ANA/"
+ana_dir_LL = "../EPG_data/8h_data/LL/LL_all_ANA/"
+
+# now we can grab ana file names. Remember 1-4 LD and 5-8 LL
+filenames_LD = list.files(path = ana_dir_LD, pattern = ".ANA")
+filenames_LL = list.files(path = ana_dir_LL, pattern = ".ANA")
+
+# load LD data
+anaDatList_LD = discoEPG::combine_ana(directory = ana_dir_LD,
+                                     filenames = filenames_LD,
+                                     validate = TRUE,
+                                     waveform_labels = waveform_labels)
+# extract data
+anaData_LD = anaDatList_LD$data
+
+# add treatment
+anaData_LD$treatment = "LD" 
+
+# load LL data
+anaDatList_LL = discoEPG::combine_ana(directory = ana_dir_LL,
+                                     filenames = filenames_LL,
+                                     validate = TRUE,
+                                     waveform_labels = waveform_labels)
+# extract data
+anaData_LL = anaDatList_LL$data
+
+# add treatment
+anaData_LL$treatment = "LL"
+
+# combine them into a single master data frame
+anaData_master = rbind(anaData_LD, anaData_LL)
+
+### assign light treatments
+
+# grab all unique filenames across both datasets
+allfiles = unique(anaData_master$filename)
+
+# define file vectors based on zt strings found in the filenames
+zt0_files  = grep("0zt",  allfiles, value = TRUE, ignore.case = TRUE)
+zt8_files  = grep("8zt",  allfiles, value = TRUE, ignore.case = TRUE)
+zt16_files = grep("16zt", allfiles, value = TRUE, ignore.case = TRUE)
+
+# assign the ZT factor column, be sure to factorize...
+anaData_master$zt = NULL
+anaData_master$zt[anaData_master$filename %in% zt0_files]  = "ZT0"
+anaData_master$zt[anaData_master$filename %in% zt8_files]  = "ZT8"
+anaData_master$zt[anaData_master$filename %in% zt16_files] = "ZT16"
+
+# (optional) check if any files missed assignment
+if(any(is.na(anaData_master$zt))) {
+  warning("Some files were not assigned a ZT group! Check your filename patterns.")
+}
+```
+
+Now start creating the plots.
+
+```{r}
+# define combinations and colors
+treatments = c("LD", "LL")
+zt_groups = c("ZT0", "ZT8", "ZT16")
+
+# set color palette colorblind safe (paul tol)
+behavior_colors = c(
+  "NP" = "black", "C"  = "#0077BB", "E1" = "#33BBEE",
+  "E2" = "#009988", "F"  = "#EE7733", "G"  = "#CC3311", "PD" = "#EE3377"
+)
+```
+
+Facet plots below.
+
+```{r}
+library(tidyverse)
+
+# combind prop data
+combined_prop_data = anaData_master %>%
+  group_split(treatment, zt) %>%
+  map_dfr(function(df) {
+    tr = unique(df$treatment)
+    z = unique(df$zt)
+    
+    # grab data from combined 
+    res = discoEPG::ana_to_timeseries_proportion(df, waveform_labels)
+    
+    # take the time data and add +8 to convert to ZT time
+    # as each recording starts at zt and is 8h long
+    res$data %>%
+      mutate(
+        treatment = tr,
+        zt = factor(z, levels = c("ZT0", "ZT8", "ZT16")),
+        # shift the timeline based on the ZT group
+        hours = case_when(
+          zt == "ZT0"  ~ hours,
+          zt == "ZT8"  ~ hours + 8,
+          zt == "ZT16" ~ hours + 16,
+          TRUE ~ hours
+        )
+      )
+  })
+
+# define the shading box for hour 16-24
+shade_df = expand.grid(
+  treatment = c("LD", "LL"), 
+  zt = factor("ZT16", levels = c("ZT0", "ZT8", "ZT16"))
+) %>%
+  mutate(
+    xmin = 16, xmax = 24, 
+    ymin = -Inf, ymax = Inf
+  )
+
+# start plot 
+faceted_summary_plot = ggplot(combined_prop_data, 
+                              aes(x = hours, 
+                                  y = proportion, 
+                                  color = activity)
+                              ) +
+  # targeted shading layer mapped strictly to ZT16
+  geom_rect(
+    data = shade_df,
+    aes(xmin = xmin, xmax = xmax, ymin = 0, ymax = ymax),
+    inherit.aes = FALSE,
+    fill = "grey50", alpha = 0.15
+  ) +
+  
+# smooth line data
+  # stat_smooth(method = "gam",
+  #             formula = y ~ s(x, bs = "cs", k = 15),
+  #             se = F, linewidth = 1, alpha = 0.2
+  #             ) +
+  
+  stat_smooth(method = "gam", 
+              formula = y ~ s(x, bs = "cs", k = 40), 
+              se = F, linewidth = 1, alpha = 0.2) +
+
+  # geom_line(linewidth = 1) +
+  
+  # grid with free x for zeitgeber time 
+  facet_grid(treatment ~ zt, scales = "free_x") + 
+  
+  # themes and explicit y axis breaks
+  theme_prism() +
+  scale_y_continuous(breaks = c(0, 0.25, 0.5, 0.75, 1), limits = c(0, 1)) +
+  
+  # ensure the breaks fall cleanly on even numbers for all scales
+  scale_x_continuous(breaks = scales::breaks_width(2)) + 
+  
+  # new colors tab10
+  scale_color_manual(
+    values = scales::alpha(behavior_colors, 0.6),
+    breaks = c('NP', 'C', 'PD', 'E1', 'E2', 'F', 'G')
+  ) +
+  # labs 
+  labs(x = "Zeitgeber Time", y = "Proportion of Aphids", color = "Behavior") +
+  # upd theme with new info. add panel spacing between facets
+  theme(
+    legend.position = "right",
+    panel.spacing.y = unit(2, "lines"),
+    panel.spacing.x = unit(1, "lines")
+    #legend.title = element_text("Behavior")
+  ) +
+  # guide line width thicker
+  guides(color = guide_legend(override.aes = list(linewidth = 2)))
+
+# print. sit tight it takes a while due to smoothing
+print(faceted_summary_plot)
+```
+
+Save the plots to svg/pdf
+
+```{r}
+# saving the combined summary plot
+# sit tight, takes a minute. large plot...
+    # ggsave(
+    #   filename = "./figures_8h/summary/TimeSeries_Summary_8h.svg",
+    #   plot = faceted_summary_plot,
+    #   width = 7.5,
+    #   height = 6,
+    #   device = "svg"
+    # )
+```
