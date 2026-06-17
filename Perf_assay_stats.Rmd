@@ -1,0 +1,375 @@
+---
+title: "Performance Assay Statistical Analysis"
+author: "Daniel Kunk"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document: default
+  pdf_document: default
+---
+# Performance Assay Analysis
+
+Load and format the data if necessary
+
+```{r}
+library(dplyr)
+# perf data above project dir
+# total # column has '#' character, rename
+perf_data = read.csv("../Perf_data/perf_data.csv") %>%
+  rename(total_aphids = Total..)
+
+```
+
+Summarize the data and plot hist across all vars.
+
+```{r}
+# load packages
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(ggridges)
+
+# summary stats
+perf_sum = perf_data %>%
+  group_by(treat) %>%
+  summarise(
+    mean_tot_adult = mean(adult),
+    mean_tot_nymph = mean(nymph),
+    mean_norm_nymph = mean(nym_per_aph),
+    median_tot_adult = median(adult),
+    median_tot_nymph = median(nymph),
+    median_norm_nymph = median(nym_per_aph),
+    sd_tot_nymph = sd(nymph), 
+    sd_norm_nymph = sd(nym_per_aph),
+    n = n()
+  )
+
+# save summary stats for suppData
+    #write.csv(perf_sum, file = "./suppData/performance_SummaryStatistics.csv")
+
+perf_data %>% ggplot(aes(x = nym_per_aph, y = factor(treat), fill = treat)) + 
+  geom_density_ridges() + theme_ridges(center_axis_labels = T) + 
+  xlab("Nymphs per Adult Aphid") + ylab(NULL) + theme(legend.position = "none")
+```
+
+Some quick code with a simple Wilcoxon test, not incorporating the variable of experimental date.
+
+```{r}
+# boxplot with statistics added, basic wilcox test...
+
+# list of comps for plots
+my_comparisons = list(c("LD", "LL"))
+
+# start plot
+perf_data %>% 
+  ggplot(aes(y = nym_per_aph, x = treat, fill = treat)) + 
+  geom_violin() + 
+  geom_jitter(width = 0.05) + 
+  geom_boxplot(width=0.1, color="black", alpha=0.2, outlier.shape = NA) + 
+  theme_classic() + 
+  theme(legend.position = "none") + 
+  xlab(NULL) + 
+  ylab("Nymphs per Adult Aphid") +
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = my_comparisons, 
+                     label = "p.signif",
+                     method.args = list(exact = FALSE),
+                     bracket.size = 0.75,       #  thickens  bracket line
+                     size = 6,               # enlarges the asterisks
+                     label.y = 17) +         # bumps bracket up 
+  stat_compare_means(method = "wilcox.test", 
+                     label.y.npc = "bottom", 
+                     label.x.npc = "left",
+                     size = 4,
+                     method.args = list(exact = FALSE, conf.int = T, correct = T))
+```
+
+Updated modeling with a gamma glm. Including if the effect is true when also controlling for experimental date.
+```{r}
+# for gamma glm
+library(MASS)
+library(DHARMa)
+
+# factorize
+perf_data$Experiment = factor(perf_data$Experiment)
+
+# see quick gamma glm. including both treat + experimental date.
+full_mod = glm(nym_per_aph ~ treat + Experiment, data = perf_data, family = Gamma(link = "log"))
+
+# summary
+summary(full_mod)
+
+# dharma
+res_full_mod = simulateResiduals(fittedModel = full_mod, plot = TRUE)
+```
+
+Making an updated violin plot with significance data overlaid
+
+```{r}
+library(dplyr)
+library(ggplot2)
+# grab models with tidy()
+library(broom)
+# for pretty plots
+library(ggprism) 
+
+# factorize
+perf_data = perf_data %>%
+  mutate(
+    treat = factor(treat, levels = c("LD", "LL")),
+    Experiment = factor(Experiment)
+  )
+
+# fit the gamma
+full_mod = glm(nym_per_aph ~ treat + Experiment, data = perf_data, family = Gamma(link = "log"))
+
+# p-value extraction
+perf_model_stats = broom::tidy(full_mod)
+
+# filter for the treatment
+treat_p_value = perf_model_stats %>%
+  filter(grepl("treatLL", term)) %>%
+  pull(p.value)
+
+# sig levels
+sig_stars = case_when(
+  treat_p_value < 0.001 ~ "***",
+  treat_p_value < 0.01  ~ "**",
+  treat_p_value < 0.05  ~ "*",
+  TRUE                  ~ "ns"
+)
+
+# the text gap and plot ceiling using 18 as the scaling anchor.
+bracket_y = 18
+text_y    = bracket_y + (18 * 0.02)  # maintains the same relative upward spacing for asterisks
+limit_y   = bracket_y + (18 * 0.08)  # maintains the same proportional upper panel cushion
+
+# start plot
+p_perf = ggplot(perf_data, aes(x = treat, y = nym_per_aph, fill = treat)) +
+  geom_violin(alpha = 1, color = NA, scale = "width", adjust = 0.8) + 
+  geom_boxplot(width = 0.5, color = "grey10", outlier.shape = NA, alpha = 0.5) +
+  geom_point(aes(shape = treat), 
+             position = position_jitter(width = 0.08),
+             color = "black", alpha = 0.5, size = 2) +
+  # set shapes
+  scale_shape_manual(values = c("LD" = 21, "LL" = 22)) +
+  # apply tol bright palette
+  scale_fill_manual(values = c("LD" = "#0077BB", "LL" = "#EE7733")) +
+  # set labels
+  labs(
+    x = NULL, 
+    y = "Nymphs per Adult Aphid"
+  ) +
+  theme_prism() +
+  theme(legend.position = "none")
+
+# add model p-values
+if (treat_p_value < 0.05) {
+  p_perf = p_perf + 
+    # horizontal line at exactly 18
+    annotate("segment", x = 1, xend = 2, y = bracket_y, yend = bracket_y, color = "black", linewidth = 0.5) +
+    # add asterisk
+    annotate("text", x = 1.5, y = text_y, label = sig_stars, size = 6, fontface = "bold") +
+    # update panel borders
+    coord_cartesian(ylim = c(0, limit_y))
+}
+
+# show fig
+print(p_perf)
+```
+
+Save the plot to disc as svg.
+
+```{r}
+# save to svg
+    # ggsave(
+    #   "./figures_performance/perf_assay_stats.svg",
+    #   plot = p_perf,
+    #   width = 4, 
+    #   height = 4,
+    #   unit = "in"
+    #        )
+```
+
+saving the coefficient tables to word doc for supp tables
+
+```{r}
+library(dplyr)
+library(broom)
+library(car)
+library(flextable) 
+library(officer)
+
+# define the stripped-down formatting function
+format_model_to_flextable_perf = function(model) {
+  
+  # extract coeff
+  tidy_coef = broom::tidy(model)
+  
+  # extract anova
+  anova_test = tryCatch({
+    car::Anova(model, type = "III") %>% 
+      broom::tidy() %>%
+      filter(term != "(Intercept)") #keeps it clean
+  }, error = function(e) {
+    NULL
+  })
+  
+  # start flextable
+
+  make_basic_ft = function(df) {
+    if(is.null(df)) return(NULL)
+    
+    flextable(df) %>%
+      colformat_double(digits = 2) %>% 
+      theme_booktabs() %>% 
+      autofit()
+  }
+  
+  # apply the helper function
+  coef_ft  = make_basic_ft(tidy_coef)
+  anova_ft = make_basic_ft(anova_test)
+  
+  return(list(coefs = coef_ft, anova = anova_ft))
+}
+
+# set dir and start saving
+dest_dir = file.path(getwd(), "tables_performance")
+if(!dir.exists(dest_dir)) dir.create(dest_dir)
+
+# define the variable name for  titles
+var_name = "Nymphs per Adult Aphid"
+
+# format the tables using mode
+tables = format_model_to_flextable_perf(full_mod)
+file_path = file.path(dest_dir, "Performance_Assay_Results.docx")
+
+# start blank Word Document
+doc = read_docx()
+
+#  attach text titles using body_add_par, then the tables
+if(!is.null(tables$anova)) {
+  doc = body_add_par(doc, paste("Type III ANOVA:", var_name), style = "Normal")
+  doc = body_add_flextable(doc, value = tables$anova)
+  doc = body_add_par(doc, "") 
+}
+
+if(!is.null(tables$coefs)) {
+  doc = body_add_par(doc, paste("Model Coefficients:", var_name), style = "Normal")
+  doc = body_add_flextable(doc, value = tables$coefs)
+  doc = body_add_par(doc, "") 
+}
+
+# save the document
+print(doc, target = file_path)
+# debug print
+print("Successfully saved Performance Assay Word document!")
+```
+
+
+
+
+
+Adult/ total aphid below likely wont need
+##############################
+
+
+```{r}
+
+# load packages
+library(MASS)
+library(DHARMa)
+
+# factorize
+perf_data$Experiment = factor(perf_data$Experiment)
+
+# Fit the Negative Binomial model
+full_mod_nb = glm.nb(total_aphids ~ treat + Experiment, data = perf_data)
+
+# summary
+summary(full_mod_nb)
+
+# dharma diagnostics to confirm overdispersion is handled
+res_full_mod_nb = simulateResiduals(fittedModel = full_mod_nb, plot = TRUE)
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+# grab models with tidy()
+library(broom)
+# for pretty plots
+library(ggprism) 
+
+# factorize
+perf_data = perf_data %>%
+  mutate(
+    treat = factor(treat, levels = c("LD", "LL")),
+    Experiment = factor(Experiment)
+  )
+
+# fit the Negative Binomial
+full_mod_nb = MASS::glm.nb(total_aphids ~ treat + Experiment, data = perf_data)
+
+# p-value extraction (broom handles glm.nb perfectly)
+perf_model_stats_nb = broom::tidy(full_mod_nb)
+
+# filter for the treatment
+treat_p_value = perf_model_stats_nb %>%
+  filter(grepl("treatLL", term)) %>%
+  pull(p.value)
+
+# sig levels
+sig_stars = case_when(
+  treat_p_value < 0.001 ~ "***",
+  treat_p_value < 0.01  ~ "**",
+  treat_p_value < 0.05  ~ "*",
+  TRUE                  ~ "ns"
+)
+
+# dynamically set the text gap and plot ceiling using the max value 
+max_val = max(perf_data$total_aphids, na.rm = TRUE)
+bracket_y = max_val * 1.05
+text_y    = bracket_y + (max_val * 0.02)  
+limit_y   = bracket_y + (max_val * 0.08)  
+
+# start plot
+p_total = ggplot(perf_data, aes(x = treat, y = total_aphids, fill = treat)) +
+  geom_violin(alpha = 1, color = NA, scale = "width", adjust = 0.8) + 
+  geom_boxplot(width = 0.5, color = "grey10", outlier.shape = NA, alpha = 0.5) +
+  geom_point(aes(shape = treat), 
+             position = position_jitter(width = 0.08),
+             color = "black", alpha = 0.5, size = 2) +
+  scale_shape_manual(values = c("LD" = 21, "LL" = 22)) +
+  scale_fill_manual(values = c("LD" = "#0077BB", "LL" = "#EE7733")) +
+  labs(
+    x = NULL, 
+    y = "Total Aphids"
+  ) +
+  theme_prism() +
+  theme(legend.position = "none")
+
+# add model p-values
+# added "|| treat_p_value >= 0.05" so it plots the "ns" bracket 
+if (treat_p_value < 0.05 || treat_p_value >= 0.05) { 
+  p_total = p_total + 
+    annotate("segment", x = 1, xend = 2, y = bracket_y, yend = bracket_y, color = "black", linewidth = 0.5) +
+    annotate("text", x = 1.5, y = text_y, label = sig_stars, size = 6, fontface = "bold") +
+    coord_cartesian(ylim = c(0, limit_y))
+}
+
+# show fig
+print(p_total)
+
+# save to svg
+    # ggsave(
+    #   "./figures_performance/perf_assay_stats_TotalAphids.svg",
+    #   plot = p_total,
+    #   width = 4, 
+    #   height = 4,
+    #   unit = "in"
+    #      )
+```
+
+
+
