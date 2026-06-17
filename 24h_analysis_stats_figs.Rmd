@@ -97,7 +97,23 @@ summary_24h = LD_LL_24 %>%
   )
 
 # save to csv for supplementary tables
-### write.csv(summary_24h, file = "./suppData/24h_EPG-SummaryStatistics")
+### write.csv(summary_24h, file = "./suppData/24h_EPG-SummaryStatistics.csv")
+
+summary_24h_full = LD_LL_24 %>%
+  group_by(description, treatment) %>%
+  summarise(
+    max = max(value),
+    min = min(value),
+    n = n(),
+    mean = mean(value),
+    sd = sd(value),
+    median = median(value),
+    mode = DescTools::Mode(value)[1],
+    .groups = "drop_last"
+  )
+
+# save to csv for supplementary tables
+    write.csv(summary_24h_full, file = "./suppData/fullVariables_24h_EPG-SummaryStatistics.csv")
 
 ```
 
@@ -262,6 +278,7 @@ library(ggplot2)
 library(dplyr)
 # for modelling
 library(MASS)
+library(glmmTMB)
 # make prettier final plots
 library(ggprism)
 
@@ -273,14 +290,17 @@ target_data = LD_LL_24 %>%
 # create an empty list to store our final plots
 boxplot_list = list()
 
+# empty list to store models 
+model_list_24h = list()
+
 # start the for loop to generate the plots.
 
+# loop through the variables
 # loop through the variables
 for (var in names(target_variables)) {
   
   unit = target_variables[[var]]
   plot_data = target_data %>% filter(description == var)
-  
   
   # unit conv. and axis labels
   if (unit == "h") {
@@ -300,31 +320,43 @@ for (var in names(target_variables)) {
   sig_label = "ns"
   
   tryCatch({
-    # 1. neg binom for all count data
+    # 1. Counts: try negative binomial first, fall back to Poisson if it fails to converge
     if (unit == "count") {
-      mod = glm.nb(value ~ treatment, data = plot_data)
+      mod = tryCatch({
+        glm.nb(value ~ treatment, data = plot_data)
+      }, error = function(e) {
+        # Fallback to Poisson if negative binomial fails/warns out due to under/equidispersion
+        glm(value ~ treatment, family = poisson(link = "log"), data = plot_data)
+      }, warning = function(w) {
+        # Catching iteration warnings and forcing the Poisson fallback
+        glm(value ~ treatment, family = poisson(link = "log"), data = plot_data)
+      })
+      
+      coefs = summary(mod)$coefficients
+      term_name = grep("treatment", rownames(coefs), value = TRUE)[1]
+      if (!is.na(term_name)) { p_val = coefs[term_name, 4] }
       
     # 2. tweedie for specific zero-inflated durations F and G
     } else if (var %in% c("Total duration of F", "Duration of G")) {
-      mod = glm(value ~ treatment, family = tweedie(var.power = 1.5, 
-                link.power = 0), data = plot_data)
+      mod = glmmTMB(value ~ treatment, family = tweedie(link = "log"), 
+                    data = plot_data)
+      
+      coefs = summary(mod)$coefficients$cond
+      term_name = grep("treatment", rownames(coefs), value = TRUE)[1]
+      if (!is.na(term_name)) { p_val = coefs[term_name, 4] }
       
     # 3. gamma for all other duration vars
     } else {
       mod = glm(value ~ treatment, family = Gamma(link = "log"), 
                 data = plot_data)
+      
+      coefs = summary(mod)$coefficients
+      term_name = grep("treatment", rownames(coefs), value = TRUE)[1]
+      if (!is.na(term_name)) { p_val = coefs[term_name, 4] }
     }
     
-    # extract the summary table
-    coefs = summary(mod)$coefficients
-    
-    # dynamically find the row name for the coefficient "treatmentLL"
-    term_name = grep("treatment", rownames(coefs), value = TRUE)[1]
-    
-    # the 4th column in a GLM summary matrix is the p-value
-    if (!is.na(term_name)) {
-      p_val = coefs[term_name, 4] 
-    }
+    # extract models to list
+    model_list_24h[[var]] = mod
     
     # convert p-value to asterisks
     sig_label = case_when(
@@ -336,19 +368,17 @@ for (var in names(target_variables)) {
     )
     
   }, error = function(e) {
-    # if a model fails to converge, print an error on the plot; debug
+    message(paste("Real error in variable:", var, "-", e$message))
     sig_label <<- "Model Error" 
   })
   
   # starting the plot p-value annotation settings
-  # find the maximum value to guide bracket placement
   max_y = max(plot_data$value, na.rm = TRUE)
+  if(is.na(max_y) || max_y == 0) max_y = 1 
   
-  # set heights based on a percentage of the max value 
   bracket_y = max_y + (max_y * 0.08) 
   text_y = bracket_y + (max_y * 0.04) 
-  upper_limit = text_y + (max_y * 0.05) # keep the text going oob
-  
+  upper_limit = text_y + (max_y * 0.05) 
   
   # make the plot
   p = ggplot(plot_data, aes(x = treatment, y = value, fill = treatment, 
@@ -357,20 +387,16 @@ for (var in names(target_variables)) {
     geom_boxplot(width = 0.5, color = "grey10", outlier.shape = NA, 
                  alpha = 0.5) +
     geom_jitter(width = 0.1, size = 3, height = 0) +
-    scale_shape_manual(
-      values = c("LD" = 21, "LL" = 22)) +
+    scale_shape_manual(values = c("LD" = 21, "LL" = 22)) +
     scale_fill_manual(values = c("LD" = "#0077BB", "LL" = "#EE7733")) +
-    # now adding the significance line and text
     annotate("segment", x = 1, xend = 2, y = bracket_y, 
              yend = bracket_y, size = 0.5) +
     annotate("text", x = 1.5, y = text_y, label = sig_label, 
              size = 6, fontface = "bold") +
     theme_prism() +
     labs(x = NULL, y = y_label) +
-    coord_cartesian(ylim = c(0, upper_limit)) + # prevents text cutoff
-    theme(
-      legend.position = "none"
-    )
+    coord_cartesian(ylim = c(0, upper_limit)) + 
+    theme(legend.position = "none")
   
   # store the plot to list and then print
   boxplot_list[[var]] = p
@@ -426,8 +452,9 @@ Making multi-plots for pub. with patchwork.
 library(patchwork)
 
 # target variables
-specific_vars = c("Total duration of C", "Total duration of E1", 
-                  "Total duration of E2", "Number of E1")
+specific_vars = c("Total duration of C", "Total duration of E2", 
+                  "Number of np", "Number of pd",
+                  "Number of C","Number of E1")
 
 # make sure they are available in the list
 available_vars = intersect(specific_vars, names(boxplot_list))
@@ -457,6 +484,107 @@ if (length(available_vars) > 0) {
   print("Saved 24h Specific Multiplot successfully!")
 }
 ```
+
+We want to generate some word files that contain all of the model data. 
+
+These will be incorporated into a large supplementary file.
+
+
+```{r}
+library(dplyr)
+library(purrr)
+library(broom)
+library(broom.mixed)
+library(car)
+library(flextable) 
+library(officer) 
+
+# function to make clean tables with names matching our manuscript
+format_model_to_flextable_clean_24h = function(model) {
+  
+  # grab and rename the model coeffs
+  tidy_coef = tryCatch({
+    broom.mixed::tidy(model, effects = "fixed")
+  }, error = function(e) {
+    broom::tidy(model)
+  })
+  
+  # clean up the intercept and rename treatment
+  tidy_coef = tidy_coef %>%
+    mutate(
+      term = gsub("\\(Intercept\\)", "Intercept", term),
+      term = gsub("treatment", "Light Regime ", term)
+    )
+  
+  # grab the anova
+  anova_test = tryCatch({
+    car::Anova(model, type = "III") %>% 
+      broom::tidy() %>% 
+      filter(term != "(Intercept)") 
+  }, error = function(e) {
+    NULL
+  })
+  
+  if(!is.null(anova_test)) {
+    anova_test = anova_test %>%
+      mutate(
+        term = gsub("treatment", "Light Regime", term)
+      )
+  }
+  
+  # build flextables
+  # added small helper function to apply some formatting
+  make_basic_ft = function(df) {
+    if(is.null(df)) return(NULL)
+    
+    flextable(df) %>%
+      colformat_double(digits = 2) %>% 
+      theme_booktabs() %>% 
+      autofit()
+  }
+  
+  # add helper function
+  coef_ft  = make_basic_ft(tidy_coef)
+  anova_ft = make_basic_ft(anova_test)
+  
+  return(list(coefs = coef_ft, anova = anova_ft))
+}
+
+
+# make directory and run loop to make tables of interest
+dest_dir = file.path(getwd(), "tables_24h")
+if(!dir.exists(dest_dir)) dir.create(dest_dir)
+
+for (var_idx in names(model_list_24h)) {
+  
+  safe_name = gsub(" ", "_", var_idx)
+  tables = format_model_to_flextable_clean_24h(model_list_24h[[var_idx]])
+  file_path = file.path(dest_dir, paste0(safe_name, "_24h_Results.docx"))
+  
+  # set up blank word doc in loop
+  doc = read_docx()
+  
+  # sequentially attach text titles using body_add_par, then the tables
+  if(!is.null(tables$anova)) {
+    doc = body_add_par(doc, paste("Type III Analysis of Deviance for:", var_idx), style = "Normal")
+    doc = body_add_flextable(doc, value = tables$anova)
+    doc = body_add_par(doc, "") # small spaceer needed
+  }
+  
+  if(!is.null(tables$coefs)) {
+    doc = body_add_par(doc, paste("Model Coefficients for:", var_idx), style = "Normal")
+    doc = body_add_flextable(doc, value = tables$coefs)
+    doc = body_add_par(doc, "") # small spacer
+  }
+  
+  # save full document
+  print(doc, target = file_path)
+  # debug print statement
+  print(paste("Successfully saved clean Word document for:", var_idx))
+}
+```
+
+
 
 # 3. Making waveform signal and time series frequency plots.
 
@@ -521,13 +649,19 @@ combined_prop_24 = anaData_24 %>%
 
 # set plot colors (colorblind safe - paul tol bright palette) 
 behavior_colors = c(
-  "NP" = "black", "C"  = "#0077BB", "E1" = "#33BBEE",
-  "E2" = "#009988", "F"  = "#EE7733", "G"  = "#CC3311", "PD" = "#EE3377"
+  "NP" = "black", "C"  = "#0077BB", "E1" = "#CC3311",
+  "E2" = "#009988", "F"  = "#EE7733", "G"  = "#33BBEE", "PD" = "#EE3377"
 )
 
 # set up a shading layer mapped only to LD facet
+# shade_df_24 = data.frame(
+#   treatment = factor("LD", levels = c("LD", "LL")),
+#   xmin = 16, xmax = 24,
+#   ymin = -Inf, ymax = Inf
+# )
+
+# set up a shading layer mapped  to all facets
 shade_df_24 = data.frame(
-  treatment = factor("LD", levels = c("LD", "LL")),
   xmin = 16, xmax = 24,
   ymin = -Inf, ymax = Inf
 )
@@ -560,7 +694,7 @@ faceted_summary_24h = ggplot(combined_prop_24,
   scale_x_continuous(breaks = seq(0, 24, by = 4)) + 
   # add the color palette above set order in legend
   scale_color_manual(
-    values = scales::alpha(behavior_colors, 0.6),
+    values = scales::alpha(behavior_colors, 0.8),
     breaks = c('NP', 'C', 'PD', 'E1', 'E2', 'F', 'G')
   ) +
   # add labels
@@ -574,17 +708,17 @@ faceted_summary_24h = ggplot(combined_prop_24,
   guides(color = guide_legend(override.aes = list(linewidth = 2)))
 
 # render the plot in the window, may take a minute 
-#print(faceted_summary_24h)
+print(faceted_summary_24h)
 
 
 # save the plot as svg. may take a while.
-    # ggsave(
-    #   filename = "./figures_24h/summary/TimeSeries_Summary_24h.svg",
-    #   plot = faceted_summary_24h,
-    #   width = 7.5,
-    #   height = 6,
-    #   device = "svg"
-    # )
+    ggsave(
+      filename = "./figures_24h/summary/TimeSeries_Summary_24h-fullshading_newcolors.svg",
+      plot = faceted_summary_24h,
+      width = 7.5,
+      height = 6,
+      device = "svg"
+    )
 ```
 
 Now we can make the signal plots showing representative waveforms across our two treatments.
@@ -622,10 +756,10 @@ ana_dir = "../EPG_data/24h_data/24h_ana/"
 my_new_colors = c(
   "np" = "grey30",
   "C"  = "#0077BB",
-  "E1" = "#33BBEE",
+  "E1" = "#CC3311",
   "E2" = "#009988",
   "F"  = "#EE7733",
-  "G"  = "#CC3311",
+  "G"  = "#33BBEE",
   "pd" = "#EE3377"
 )
 
@@ -705,4 +839,153 @@ combined_signal_plot = wrap_plots(signal_plot_list, ncol = 2, byrow = FALSE, gui
     #   height = 10,
     #   device = "svg")
 ```
+
+same as above with only 1 column and standard scales -6 to 6
+
+```{r}
+# first we can make some plots that will summarize EPG signals across treatments
+# we can pick a bunch of random recordings across each light treat
+# then we can facet them with patchwork to make them look good.
+# to do this we can use EPGplotR and a loop to speed things up.
+
+# load packages
+library(EPGplotR)
+# if not loaded already
+library(patchwork)
+library(ggplot2)
+library(ggprism)
+
+# select the representative files for each treat
+rep_files = c(
+  # LD Representatives
+  "24h_LD_LL_Rep3-ch4", 
+  "LD-LL_16_8_0zt-ch3", 
+  "LD-LL_16_8_0zt_rep2-ch4", 
+  # LL Representatives
+  "24h_LD_LL_Rep3-ch5", 
+  "LD-LL_16_8_0zt-ch7", 
+  "LD-LL_16_8_0zt-ch8"
+)
+
+# define directories for data and ana
+dxx_dir = "../EPG_data/24h_data/24h/" 
+ana_dir = "../EPG_data/24h_data/24h_ana/"
+
+# def new colors.
+my_new_colors = c(
+  "np" = "grey30",
+  "C"  = "#0077BB",
+  "E1" = "#CC3311",
+  "E2" = "#009988",
+  "F"  = "#EE7733",
+  "G"  = "#33BBEE",
+  "pd" = "#EE3377"
+)
+
+# create the empty list to hold the plots
+signal_plot_list = list()
+
+# loop through using seq_along to track the index
+for (i in seq_along(rep_files)) {
+  
+  file_base = rep_files[i]
+  d01_path = paste0(dxx_dir, file_base, ".D01")
+  ana_path = paste0(ana_dir, file_base, ".ANA")
+  
+  # small debug to make sure files exist
+  if(file.exists(d01_path) & file.exists(ana_path)) {
+    
+    # load data and annotate with EPGplotR functions
+    rec_dt = load_d0x_files(d01_path)
+    ana_dt = load_ana_file(ana_path)
+    assign_behavior_codes(rec_dt, ana_dt)
+    
+    # generate the static plot
+    p = gg_plot_signal(
+      rec_dt, 
+      downsample_rate = 10, 
+      alpha = 0.8, 
+      plot_title = "" # remove default title to avoid duplicates
+                      ) + 
+      # add text annotation inside the plot at the top right
+      annotate("text", x = Inf, y = Inf, label = paste("Rec. Name = ", file_base), 
+               hjust = 1.05, vjust = 1.5, size = 3) +
+      theme_prism() +
+      # explicitly declare labels so we can control them
+      labs(x = "Zeitgeber Time", y = "Signal (V)") +
+      # new color. wont see changes on initial print
+      scale_color_manual(values = my_new_colors, name = "Behavior",
+                         breaks = c("np", "C", "pd", "E1", "E2", "F", "G"),
+                         labels = c("NP", "C", "PD", "E1", "E2", "F", "G")) +
+      # rescale and rename x axis
+      scale_x_continuous(
+        name = "Zeitgeber Time",       
+        breaks = seq(0, 24, by = 4),   
+        limits = c(0, 24),             
+        expand = c(0, 0)               
+      ) +
+      # set y xis
+      scale_y_continuous(
+        limits = c(-6, 6),
+        breaks = seq(-6, 6, by = 3)
+      ) +
+      theme(plot.title = element_text(size = 8, face = "plain" )) +
+      guides(color = guide_legend(override.aes = list(linewidth = 2)))
+    
+    # strip duplicate y axis titles
+    # removes the Y-axis title from all plots but the 3rd and 4th ones
+    # to balance the figure and avoid repetition.
+    if (!(i %in% c(3, 4))) {
+      p = p + theme(axis.title.y = element_blank())
+    }
+    
+    # add to the list
+    signal_plot_list[[i]] = p
+    # small debug print statement
+    print(paste("Generated plot for:", file_base))
+    
+  } else {
+    warning(paste("Missing D01 or ANA file for:", file_base))
+  }
+}
+
+# add treatment titles directly to plots 1 and 4 (start of LD and LL)
+signal_plot_list[[1]] = signal_plot_list[[1]] + 
+  ggtitle("LD Treatment") + 
+  theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5))
+
+signal_plot_list[[4]] = signal_plot_list[[4]] + 
+  ggtitle("LL Treatment") + 
+  theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5))
+
+# stitch to one flat list
+# because it is a single list of 6, axes = "collect"  drops the X-axes, 
+# and guides = "collect" extracts a single legend.
+combined_signal_plot = wrap_plots(signal_plot_list, ncol = 1, guides = "collect", axes = "collect") +
+  plot_annotation(
+    title = 'Representative 24 h EPG Signals',
+    theme = theme(
+      plot.title = element_text(size = 18, face = "bold", hjust = 0.5)
+    )
+  )
+
+# quick look to see how it is, will take a minute
+print(combined_signal_plot)
+
+# save, will take a minute
+# about the width of US letter with 1 in margins
+    # ggsave(
+    #   filename = "./figures_24h/signals/Combined_24h_Signals_Faceted_1col-legend.svg",
+    #   plot = combined_signal_plot,
+    #   width = 7.5,
+    #   height = 10,
+    #   device = "svg")
+```
+
+
+
+
+
+
+
 

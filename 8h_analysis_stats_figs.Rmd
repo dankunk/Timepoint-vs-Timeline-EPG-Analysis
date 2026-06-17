@@ -115,7 +115,23 @@ summary_8h = LD_LL_8h %>%
   )
 
 # write to csv for supp data
-      #write.csv(summary_8h, file = "./suppData/8h_EPG-SummaryStatistics")
+      #write.csv(summary_8h, file = "./suppData/8h_EPG-SummaryStatistics.csv")
+
+summary_8h_full = LD_LL_8h %>%
+  group_by(description, treatment, light) %>%
+  summarise(
+    max = max(value),
+    min = min(value),
+    n = n(),
+    mean = mean(value),
+    sd = sd(value),
+    median = median(value),
+    mode = DescTools::Mode(value)[1],
+    .groups = "drop_last"
+  )
+
+# write to csv for supp data
+      #write.csv(summary_8h_full, file = "./suppData/fullVariables_8h_EPG-SummaryStatistics.csv")
 
 ```
 
@@ -133,6 +149,7 @@ Small sandbox to do some initial modeling
 
 ```{r}
 # small modelling sandbox
+
 # load required modeling and diagnostic packages
 library(dplyr)
 library(MASS)
@@ -438,6 +455,14 @@ target_data = LD_LL_8h %>%
 # make the empty list for the plots
 boxplot_list_8h = list()
 
+# empty list to store models 
+model_list_8h = list()
+
+# lists to store anova and pairwise comps
+anova_list_8h = list() 
+pairs_list_8h = list() 
+
+
 # start looping through the EPG variable
 for (var in names(target_variables)) {
   
@@ -494,8 +519,16 @@ for (var in names(target_variables)) {
                 data = plot_data)
     }
     
+    # save fitted model to empty list with var as name
+    model_list_8h[[var]] = mod
+    
     # run type 3 anova to check global significance
     aov_res = Anova(mod, type = "III")
+    
+    # save anova to list
+    anova_list_8h[[var]] = aov_res
+    
+    # grab anova cols
     p_col = grep("Pr", colnames(aov_res), value = TRUE)[1]
     
     p_trt = ifelse("treatment" %in% rownames(aov_res), 
@@ -512,7 +545,18 @@ for (var in names(target_variables)) {
       emm = emmeans(mod, ~ treatment * light, type = "response", 
                     adjust = "fdr")
       
-      # extract pairwise dataframes
+      
+      # extract raw pairwise dataframes to save to list
+      raw_pairs_lgt = as.data.frame(pairs(emm, simple = "light", adjust = "fdr"))
+      raw_pairs_trt = as.data.frame(pairs(emm, simple = "treatment", adjust = "fdr"))
+      
+      # save raw pairwise comps to list, significant or not, all saved
+      pairs_list_8h[[var]] = bind_rows(
+        raw_pairs_lgt %>% mutate(comp_type = "Within-ZT (LD vs LL)"),
+        raw_pairs_trt %>% mutate(comp_type = "Across-ZT (Temporal Changes)")
+      )
+      
+      # extract filtered pairwise dataframes for plotting, only plot sig
       pairs_lgt = as.data.frame(pairs(emm, simple = "light", 
                                       adjust = "fdr")) %>% 
         filter(p.value < 0.05)
@@ -544,9 +588,9 @@ for (var in names(target_variables)) {
           # annotate plot with the brackets and text
           p = p + 
             annotate("segment", x = x1, xend = x2, y = current_y, 
-                     yend = current_y, linewidth = 0.5) +
+                     yend = current_y, linewidth = 0.75) +
             annotate("text", x = x_center, y = current_y + (max_y * 0.02), 
-                     label = sig_stars, size = 5, fontface = "bold")
+                     label = sig_stars, size = 5, fontface = "plain")
           
           current_y = current_y + step_y
         }
@@ -573,10 +617,10 @@ for (var in names(target_variables)) {
           # add annotations
           p = p + 
             annotate("segment", x = x1, xend = x2, y = current_y, 
-                     yend = current_y, linewidth = 0.5) +
+                     yend = current_y, linewidth = 0.75) +
             annotate("text", x = mean(c(x1, x2)), 
                      y = current_y + (max_y * 0.02), 
-                     label = sig_stars, size = 6, fontface = "bold")
+                     label = sig_stars, size = 5, fontface = "plain")
           
           current_y = current_y + step_y
         }
@@ -632,7 +676,10 @@ These should be pub. ready.
 library(patchwork)
 
 # define grouping vars
-specific_vars = c("Total duration of C", "Total duration of E1", "Total duration of E2", "Number of E1")
+specific_vars = c("Total duration of C", "Total duration of E2", 
+                  "Number of np", "Number of pd",
+                  "Number of C","Number of E1")
+
 
 # debug
 available_vars = intersect(specific_vars, names(boxplot_list_8h))
@@ -655,16 +702,154 @@ if (length(available_vars) > 0) {
     plot_annotation(tag_levels = 'A')
   
   # ggsave(
-  #   filename = "./figures_8h/multiplots/variables_durations_and_counts_8h_nolegend.svg",
+  #   filename = "./figures_8h/multiplots/variables_durations_and_counts_8h_nolegend_neworder.svg",
   #   plot = combined_plot_1,
-  #   width = 9,      # Scaled up for 2x2 panel
-  #   height = 8,
+  #   width = 7.5,      # Scaled up for 2x2 panel
+  #   height = 10,
   #   device = "svg"
   # )
   print(combined_plot_1)
   print("Saved Multiplot 1 successfully!")
 }
 ```
+
+We want to automate the output of these tables onto word documents to easily make supplementary tables for submission 
+
+we can do that in this code chunk
+
+```{r}
+library(dplyr)
+library(purrr)
+library(broom)
+library(broom.mixed)
+library(car)
+library(flextable) 
+library(officer) 
+library(emmeans)
+
+# define the slightly-cleaned formatting function
+format_model_to_flextable_clean_names = function(model, var_name) {
+  
+  # extract and rename coeffs
+  tidy_coef = tryCatch({
+    broom.mixed::tidy(model, effects = "fixed")
+  }, error = function(e) {
+    broom::tidy(model)
+  })
+  
+  # swap terms in the term column to names that match manuscript
+  tidy_coef = tidy_coef %>%
+    mutate(
+      term = gsub("treatment", "Time of Day ", term),
+      term = gsub("light", "Light Regime ", term),
+      term = gsub(":", " \u00D7 ", term) # Also makes the interaction symbol look professional
+    )
+  
+  # extract and rename anova
+  anova_test = tryCatch({
+    car::Anova(model, type = "III") %>% 
+      broom::tidy() %>% 
+      filter(term != "(Intercept)") 
+  }, error = function(e) {
+    NULL
+  })
+  
+  if(!is.null(anova_test)) {
+    anova_test = anova_test %>%
+      mutate(
+        term = gsub("treatment", "Time of Day", term),
+        term = gsub("light", "Light Regime", term),
+        term = gsub(":", " \u00D7 ", term)
+      )
+  }
+  
+  # if sig, extract and rename pairwise results
+  pairs_lgt_data = NULL
+  pairs_trt_data = NULL
+  
+  if(!is.null(anova_test) && any(anova_test$p.value < 0.05, na.rm = TRUE)) {
+    tryCatch({
+      emm = emmeans(model, ~ treatment * light, type = "response", adjust = "fdr")
+      
+      # extract and rename the 'treatment' column to 'Time of Day'
+      pairs_lgt_data = as.data.frame(pairs(emm, simple = "light", adjust = "fdr")) %>%
+        rename(`Time of Day` = treatment) 
+      
+      # extract and rename the 'light' column to 'Light Regime'
+      pairs_trt_data = as.data.frame(pairs(emm, simple = "treatment", adjust = "fdr")) %>%
+        rename(`Light Regime` = light)    
+      
+    }, error = function(e) {
+      message(paste("Note: Pairwise extraction skipped or failed for", var_name, "-", e$message))
+    })
+  }
+  
+  # build the flextables
+  # adding a small helper to add titles above tables
+  make_basic_ft = function(df) {
+    if(is.null(df)) return(NULL)
+    
+    flextable(df) %>%
+      colformat_double(digits = 2) %>% 
+      theme_booktabs() %>% 
+      autofit()
+  }
+  
+  # apply helper
+  coef_ft      = make_basic_ft(tidy_coef)
+  anova_ft     = make_basic_ft(anova_test)
+  pairs_lgt_ft = make_basic_ft(pairs_lgt_data)
+  pairs_trt_ft = make_basic_ft(pairs_trt_data)
+  
+  return(list(coefs = coef_ft, anova = anova_ft, pairs_lgt = pairs_lgt_ft, pairs_trt = pairs_trt_ft))
+}
+
+
+# get directory and start loop to make files
+dest_dir = file.path(getwd(), "tables_8h")
+if(!dir.exists(dest_dir)) dir.create(dest_dir)
+
+for (var_idx in names(model_list_8h)) {
+  
+  safe_name = gsub(" ", "_", var_idx)
+  tables = format_model_to_flextable_clean_names(model_list_8h[[var_idx]], var_idx)
+  file_path = file.path(dest_dir, paste0(safe_name, "_8h_Results.docx"))
+  
+  # start blank word doc.
+  doc = read_docx()
+  
+  # add files sequentially
+  if(!is.null(tables$anova)) {
+    doc = body_add_par(doc, paste("Type III ANOVA:", var_idx), style = "Normal")
+    doc = body_add_flextable(doc, value = tables$anova)
+    doc = body_add_par(doc, "") 
+  }
+  
+  if(!is.null(tables$coefs)) {
+    doc = body_add_par(doc, paste("Model Coefficients:", var_idx), style = "Normal")
+    doc = body_add_flextable(doc, value = tables$coefs)
+    doc = body_add_par(doc, "")
+  }
+  
+  if(!is.null(tables$pairs_lgt)) {
+    doc = body_add_par(doc, paste("Pairwise (LD vs LL within ZT):", var_idx), style = "Normal")
+    doc = body_add_flextable(doc, value = tables$pairs_lgt)
+    doc = body_add_par(doc, "")
+  }
+  
+  if(!is.null(tables$pairs_trt)) {
+    doc = body_add_par(doc, paste("Pairwise (Temporal changes within Light Regime):", var_idx), style = "Normal")
+    doc = body_add_flextable(doc, value = tables$pairs_trt)
+  }
+  
+  # save the fully built document
+  print(doc, target = file_path)
+  
+  print(paste("Successfully saved Word document for:", var_idx))
+}
+```
+
+
 
 # 3. EPG Summary Plots
 
@@ -738,7 +923,7 @@ anaData_master$zt[anaData_master$filename %in% zt0_files]  = "ZT0"
 anaData_master$zt[anaData_master$filename %in% zt8_files]  = "ZT8"
 anaData_master$zt[anaData_master$filename %in% zt16_files] = "ZT16"
 
-# (optional) check if any files missed assignment
+# check if any files missed assignment
 if(any(is.na(anaData_master$zt))) {
   warning("Some files were not assigned a ZT group! Check your filename patterns.")
 }
@@ -753,8 +938,8 @@ zt_groups = c("ZT0", "ZT8", "ZT16")
 
 # set color palette colorblind safe (paul tol)
 behavior_colors = c(
-  "NP" = "black", "C"  = "#0077BB", "E1" = "#33BBEE",
-  "E2" = "#009988", "F"  = "#EE7733", "G"  = "#CC3311", "PD" = "#EE3377"
+  "NP" = "black", "C"  = "#0077BB", "E1" = "#CC3311",
+  "E2" = "#009988", "F"  = "#EE7733", "G"  = "#33BBEE", "PD" = "#EE3377"
 )
 ```
 
@@ -835,9 +1020,9 @@ faceted_summary_plot = ggplot(combined_prop_data,
   # ensure the breaks fall cleanly on even numbers for all scales
   scale_x_continuous(breaks = scales::breaks_width(2)) + 
   
-  # new colors tab10
+  # new colors tol
   scale_color_manual(
-    values = scales::alpha(behavior_colors, 0.6),
+    values = scales::alpha(behavior_colors, 0.8),
     breaks = c('NP', 'C', 'PD', 'E1', 'E2', 'F', 'G')
   ) +
   # labs 
@@ -862,7 +1047,7 @@ Save the plots to svg/pdf
 # saving the combined summary plot
 # sit tight, takes a minute. large plot...
     # ggsave(
-    #   filename = "./figures_8h/summary/TimeSeries_Summary_8h.svg",
+    #   filename = "./figures_8h/summary/TimeSeries_Summary_8h_newcolors.svg",
     #   plot = faceted_summary_plot,
     #   width = 7.5,
     #   height = 6,
