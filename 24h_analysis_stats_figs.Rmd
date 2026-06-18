@@ -908,11 +908,11 @@ for (i in seq_along(rep_files)) {
       plot_title = "" # remove default title to avoid duplicates
     ) 
     
-    # INJECT SHADING LAYER: Place it at the beginning of the layer list
+    # add shading layer first, ideally on the bottom of the plot
     shade_layer = annotate("rect", xmin = 16, xmax = 24, ymin = -Inf, ymax = Inf, fill = "grey30", alpha = 0.15)
     p$layers = c(shade_layer, p$layers)
     
-    # RESUME CHAIN: Add the rest of your annotations and themes
+    # add the plot annotaions and themes...
     p = p + 
       # add text annotation inside the plot at the top right
       annotate("text", x = Inf, y = Inf, label = paste("Rec. Name = ", file_base), 
