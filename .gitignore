@@ -8,3 +8,4 @@ figures_8h/**/*.svg
 figures_performance/**/*.svg
 suppData/*
 tables_*/
+renv/library/
