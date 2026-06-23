@@ -496,11 +496,12 @@ for (var in names(target_variables)) {
       values = c("LD" = 21, "LL" = 22) 
     ) +
     scale_fill_manual(values = c("LD" = "#0077BB", "LL" = "#EE7733")) +
+    scale_x_discrete(labels = c("ZT0" = "0", "ZT8" = "8", "ZT16" = "16")) +
     guides(fill = guide_legend(position = "inside"),
              shape = guide_legend(position = "inside")) +
     theme_prism() +
     theme(legend.position.inside = c(.95, .95)) +
-    labs(x = "Zeitgeber Time", y = y_label, fill = "Light Regime", shape = "Light Regime")
+    labs(x = "Zeitgeber / Circadian Time (h)", y = y_label, fill = "Light Regime", shape = "Light Regime")
   
   tryCatch({
     # 1. neg binom for all count data
@@ -653,7 +654,7 @@ for (var_name in names(boxplot_list_8h)) {
   
   # clean up the name for the file system
   safe_name = gsub(" ", "_", var_name)
-  file_path = paste0("./figures_8h/boxplots/", safe_name, ".svg")
+  file_path = paste0("./figures_8h/boxplots/", safe_name, "upd_x-axis_.svg")
   
   # save as svg
   # ggsave(
@@ -671,6 +672,8 @@ for (var_name in names(boxplot_list_8h)) {
 Now we can create some multi-plots that contain duration of C, duration of E1, duration of E2, number of E1.
 
 These should be pub. ready.
+
+Manually dropping X axis, i.e. collecting to bottom row of plots.
 
 ```{r}
 library(patchwork)
@@ -691,20 +694,29 @@ if (length(available_vars) > 0) {
   # extract the plots into a sublist
   multi_plots = boxplot_list_8h[available_vars]
   
-  # combine  using patchwork syntax
-  # wrap_plots takes a list of plots and builds a grid
+  # strip the x-axis title from all plots EXCEPT the bottom row
+  # for a 6-plot, 2-column grid, this removes the label from plots 1 through 4
+  for (i in 1:(length(multi_plots) - 2)) {
+    multi_plots[[i]] = multi_plots[[i]] + theme(axis.title.x = element_blank())
+  }
+  
+  # combine using patchwork syntax
   combined_plot_1 = wrap_plots(multi_plots, ncol = 2) + 
-    plot_layout(guides = "collect", # one legend
-                axis_titles = "collect_x") &  # one axis
-    theme(legend.position = "none") &      # dropping for prettier, wide plots, save with this argument off and copy over using inkscape
+    # Dropped axis_titles = "collect_x" since we are handling it manually above
+    plot_layout(guides = "collect") &  
+    theme(
+      legend.position = "none",
+      # Added extra bottom margin so your x-axis text and parenthesis don't clip
+      plot.margin = margin(t = 5, r = 5, b = 15, l = 5) 
+    ) &      
     guides(fill = guide_legend(nrow = 1, byrow = TRUE),
       shape = guide_legend(nrow = 1, byrow = TRUE)) &
     plot_annotation(tag_levels = 'A')
   
   # ggsave(
-  #   filename = "./figures_8h/multiplots/variables_durations_and_counts_8h_nolegend_neworder.svg",
+  #   filename = "./figures_8h/multiplots/variables_durations_and_counts_8h_nolegend_neworder_axis_dropped.svg",
   #   plot = combined_plot_1,
-  #   width = 7.5,      # Scaled up for 2x2 panel
+  #   width = 7.5,
   #   height = 10,
   #   device = "svg"
   # )
