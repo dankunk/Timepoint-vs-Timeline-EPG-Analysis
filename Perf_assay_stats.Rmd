@@ -272,26 +272,7 @@ print("Successfully saved Performance Assay Word document!")
 Adult/ total aphid below likely wont need
 ##############################
 
-
-```{r}
-
-# load packages
-library(MASS)
-library(DHARMa)
-
-# factorize
-perf_data$Experiment = factor(perf_data$Experiment)
-
-# Fit the Negative Binomial model
-full_mod_nb = glm.nb(total_aphids ~ treat + Experiment, data = perf_data)
-
-# summary
-summary(full_mod_nb)
-
-# dharma diagnostics to confirm overdispersion is handled
-res_full_mod_nb = simulateResiduals(fittedModel = full_mod_nb, plot = TRUE)
-```
-
+total adults + nymphs
 
 ```{r}
 library(dplyr)
@@ -308,19 +289,33 @@ perf_data = perf_data %>%
     Experiment = factor(Experiment)
   )
 
-# fit the Negative Binomial
-full_mod_nb = MASS::glm.nb(total_aphids ~ treat + Experiment, data = perf_data)
+# fit the Poisson GLM
+full_mod_poisson = glm(total_aphids ~ treat + Experiment, family = poisson, data = perf_data)
 
-# p-value extraction (broom handles glm.nb perfectly)
-perf_model_stats_nb = broom::tidy(full_mod_nb)
+# summary
+summary(full_mod_poisson)
 
-# filter for the treatment
-treat_p_value = perf_model_stats_nb %>%
-  filter(grepl("treatLL", term)) %>%
+# dharma diagnostics to confirm overdispersion is handled
+res_full_mod_pois = simulateResiduals(fittedModel = full_mod_poisson, plot = TRUE)
+
+# p-value extraction (broom handles standard glms perfectly too)
+perf_model_stats_poisson = broom::tidy(full_mod_poisson)
+
+# filter for the treatment safely by searching for "treat" broadly
+treat_p_value = perf_model_stats_poisson %>%
+  filter(grepl("treat", term)) %>%
   pull(p.value)
+
+# If multiple terms matched (e.g., if you had treatLL and treatSomethingElse), 
+# grab the first treatment effect row
+treat_p_value = treat_p_value[1] 
+
+# Handle the case where the term vector might still be empty/NA safely
+if (length(treat_p_value) == 0) treat_p_value = NA
 
 # sig levels
 sig_stars = case_when(
+  is.na(treat_p_value)  ~ "ns",
   treat_p_value < 0.001 ~ "***",
   treat_p_value < 0.01  ~ "**",
   treat_p_value < 0.05  ~ "*",
@@ -349,16 +344,20 @@ p_total = ggplot(perf_data, aes(x = treat, y = total_aphids, fill = treat)) +
   theme_prism() +
   theme(legend.position = "none")
 
-# add model p-values
-# added "|| treat_p_value >= 0.05" so it plots the "ns" bracket 
-if (treat_p_value < 0.05 || treat_p_value >= 0.05) { 
+# add model p-values safely
+if (!is.na(treat_p_value)) { 
   p_total = p_total + 
     annotate("segment", x = 1, xend = 2, y = bracket_y, yend = bracket_y, color = "black", linewidth = 0.5) +
     annotate("text", x = 1.5, y = text_y, label = sig_stars, size = 6, fontface = "bold") +
     coord_cartesian(ylim = c(0, limit_y))
+} else {
+  # fallback if the model completely dropped the term
+  p_total = p_total + 
+    annotate("segment", x = 1, xend = 2, y = bracket_y, yend = bracket_y, color = "black", linewidth = 0.5) +
+    annotate("text", x = 1.5, y = text_y, label = "ns", size = 6, fontface = "bold") +
+    coord_cartesian(ylim = c(0, limit_y))
 }
 
-# show fig
 print(p_total)
 
 # save to svg
@@ -372,4 +371,120 @@ print(p_total)
 ```
 
 
+total nymphs
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(broom)
+library(ggprism) 
+
+# factorize
+perf_data = perf_data %>%
+  mutate(
+    treat = factor(treat, levels = c("LD", "LL")),
+    Experiment = factor(Experiment)
+  )
+
+# fit the Poisson GLM for nymphs
+mod_nymph_poisson = glm(nymph ~ treat + Experiment, family = poisson, data = perf_data)
+
+# summary
+summary(mod_nymph_poisson)
+
+# dharma diagnostics
+# res_nymph_pois = simulateResiduals(fittedModel = mod_nymph_poisson, plot = TRUE)
+
+# p-value extraction
+nymph_model_stats = broom::tidy(mod_nymph_poisson)
+
+# filter for the treatment safely by searching for "treat" broadly
+treat_p_value = nymph_model_stats %>%
+  filter(grepl("treat", term)) %>%
+  pull(p.value)
+
+# grab the first treatment effect row if multiple matched
+treat_p_value = treat_p_value[1] 
+
+# handle the case where the term vector might still be empty/NA safely
+if (length(treat_p_value) == 0) treat_p_value = NA
+
+# sig levels
+sig_stars = case_when(
+  is.na(treat_p_value)  ~ "ns",
+  treat_p_value < 0.001 ~ "***",
+  treat_p_value < 0.01  ~ "**",
+  treat_p_value < 0.05  ~ "*",
+  TRUE                  ~ "ns"
+)
+
+# dynamically set the text gap and plot ceiling using the max value of nymphs
+max_val = max(perf_data$nymph, na.rm = TRUE)
+bracket_y = max_val * 1.05
+text_y    = bracket_y + (max_val * 0.02)  
+limit_y   = bracket_y + (max_val * 0.08)  
+
+# start plot
+p_nymph = ggplot(perf_data, aes(x = treat, y = nymph, fill = treat)) +
+  geom_violin(alpha = 1, color = NA, scale = "width", adjust = 0.8) + 
+  geom_boxplot(width = 0.5, color = "grey10", outlier.shape = NA, alpha = 0.5) +
+  geom_point(aes(shape = treat), 
+             position = position_jitter(width = 0.08),
+             color = "black", alpha = 0.5, size = 2) +
+  scale_shape_manual(values = c("LD" = 21, "LL" = 22)) +
+  scale_fill_manual(values = c("LD" = "#0077BB", "LL" = "#EE7733")) +
+  labs(
+    x = NULL, 
+    y = "Total Nymphs"
+  ) +
+  theme_prism() +
+  theme(legend.position = "none")
+
+# add model p-values safely
+if (!is.na(treat_p_value)) { 
+  p_nymph = p_nymph + 
+    annotate("segment", x = 1, xend = 2, y = bracket_y, yend = bracket_y, color = "black", linewidth = 0.5) +
+    annotate("text", x = 1.5, y = text_y, label = sig_stars, size = 6, fontface = "bold") +
+    coord_cartesian(ylim = c(0, limit_y))
+} else {
+  # fallback if the model completely dropped the term
+  p_nymph = p_nymph + 
+    annotate("segment", x = 1, xend = 2, y = bracket_y, yend = bracket_y, color = "black", linewidth = 0.5) +
+    annotate("text", x = 1.5, y = text_y, label = "ns", size = 6, fontface = "bold") +
+    coord_cartesian(ylim = c(0, limit_y))
+}
+
+print(p_nymph)
+
+# save to svg
+# ggsave(
+#   "./figures_performance/perf_assay_stats_TotalNymphs.svg",
+#   plot = p_nymph,
+#   width = 4, 
+#   height = 4,
+#   unit = "in"
+# )
+```
+
+New plot combining the Total nymph + fecundity plots w/patchwork 
+
+```{r}
+library(patchwork)
+# combined plot
+combined_performance_plot = p_nymph + p_perf + 
+  plot_annotation(tag_levels = 'A') & 
+  theme(plot.tag = element_text(size = 16, face = "bold"))
+
+# take a peek before saving
+print(combined_performance_plot)
+
+# save to disc
+# ggsave(
+#   "./figures_performance/perf_assay_combined_nymphs.svg",
+#   plot = combined_performance_plot,
+#   width = 8, 
+#   height = 4,
+#   unit = "in"
+# )
+```
 
