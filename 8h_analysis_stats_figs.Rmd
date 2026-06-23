@@ -702,19 +702,17 @@ if (length(available_vars) > 0) {
   
   # combine using patchwork syntax
   combined_plot_1 = wrap_plots(multi_plots, ncol = 2) + 
-    # Dropped axis_titles = "collect_x" since we are handling it manually above
+    # dropped axis_titles = "collect_x" since handling it manually above
     plot_layout(guides = "collect") &  
     theme(
-      legend.position = "none",
-      # Added extra bottom margin so your x-axis text and parenthesis don't clip
-      plot.margin = margin(t = 5, r = 5, b = 15, l = 5) 
+      legend.position = "none"
     ) &      
     guides(fill = guide_legend(nrow = 1, byrow = TRUE),
       shape = guide_legend(nrow = 1, byrow = TRUE)) &
     plot_annotation(tag_levels = 'A')
   
   # ggsave(
-  #   filename = "./figures_8h/multiplots/variables_durations_and_counts_8h_nolegend_neworder_axis_dropped.svg",
+  #   filename = "./figures_8h/multiplots/variables_durations_and_counts_8h_nolegend_neworder_axisv2.svg",
   #   plot = combined_plot_1,
   #   width = 7.5,
   #   height = 10,
@@ -997,14 +995,14 @@ shade_df = expand.grid(
   )
 
 # start plot 
-faceted_summary_plot = ggplot(combined_prop_data, 
+plot_LD = ggplot(combined_prop_data %>% filter(treatment == "LD"), 
                               aes(x = hours, 
                                   y = proportion, 
                                   color = activity)
                               ) +
   # targeted shading layer mapped strictly to ZT16
   geom_rect(
-    data = shade_df,
+    data = shade_df %>% filter(treatment == "LD"),
     aes(xmin = xmin, xmax = xmax, ymin = 0, ymax = ymax),
     inherit.aes = FALSE,
     fill = "grey50", alpha = 0.15
@@ -1023,7 +1021,7 @@ faceted_summary_plot = ggplot(combined_prop_data,
   # geom_line(linewidth = 1) +
   
   # grid with free x for zeitgeber time 
-  facet_grid(treatment ~ zt, scales = "free_x") + 
+  facet_grid(. ~ zt, scales = "free_x") + 
   
   # themes and explicit y axis breaks
   theme_prism() +
@@ -1038,7 +1036,7 @@ faceted_summary_plot = ggplot(combined_prop_data,
     breaks = c('NP', 'C', 'PD', 'E1', 'E2', 'F', 'G')
   ) +
   # labs 
-  labs(x = "Zeitgeber Time", y = "Proportion of Aphids", color = "Behavior") +
+  labs(x = "Zeitgeber Time (h)", y = "Proportion of Aphids", color = "Behavior") +
   # upd theme with new info. add panel spacing between facets
   theme(
     legend.position = "right",
@@ -1048,6 +1046,55 @@ faceted_summary_plot = ggplot(combined_prop_data,
   ) +
   # guide line width thicker
   guides(color = guide_legend(override.aes = list(linewidth = 2)))
+
+
+plot_LL = ggplot(combined_prop_data %>% filter(treatment == "LL") %>% mutate(ct_label = factor(str_replace(zt, "ZT", "CT"), levels = c("CT0", "CT8", "CT16"))), 
+                              aes(x = hours, 
+                                  y = proportion, 
+                                  color = activity)
+                              ) +
+  
+# smooth line data
+  # stat_smooth(method = "gam",
+  #             formula = y ~ s(x, bs = "cs", k = 15),
+  #             se = F, linewidth = 1, alpha = 0.2
+  #             ) +
+  
+  stat_smooth(method = "gam", 
+              formula = y ~ s(x, bs = "cs", k = 40), 
+              se = F, linewidth = 1, alpha = 0.2) +
+
+  # geom_line(linewidth = 1) +
+  
+  # grid with free x for circadian time 
+  facet_grid(. ~ ct_label, scales = "free_x") + 
+  
+  # themes and explicit y axis breaks
+  theme_prism() +
+  scale_y_continuous(breaks = c(0, 0.25, 0.5, 0.75, 1), limits = c(0, 1)) +
+  
+  # ensure the breaks fall cleanly on even numbers for all scales
+  scale_x_continuous(breaks = scales::breaks_width(2)) + 
+  
+  # new colors tol
+  scale_color_manual(
+    values = scales::alpha(behavior_colors, 0.8),
+    breaks = c('NP', 'C', 'PD', 'E1', 'E2', 'F', 'G')
+  ) +
+  # labs 
+  labs(x = "Circadian Time (h)", y = "Proportion of Aphids", color = "Behavior") +
+  # upd theme with new info. add panel spacing between facets
+  theme(
+    legend.position = "right",
+    panel.spacing.y = unit(2, "lines"),
+    panel.spacing.x = unit(1, "lines")
+    #legend.title = element_text("Behavior")
+  ) +
+  # guide line width thicker
+  guides(color = guide_legend(override.aes = list(linewidth = 2)))
+
+# combine via patchwork
+faceted_summary_plot = plot_LD / plot_LL + plot_layout(guides = "collect")
 
 # print. sit tight it takes a while due to smoothing
 print(faceted_summary_plot)
@@ -1059,7 +1106,7 @@ Save the plots to svg/pdf
 # saving the combined summary plot
 # sit tight, takes a minute. large plot...
     # ggsave(
-    #   filename = "./figures_8h/summary/TimeSeries_Summary_8h_newcolors.svg",
+    #   filename = "./figures_8h/summary/TimeSeries_Summary_8h_newcolors_upd_facet.svg",
     #   plot = faceted_summary_plot,
     #   width = 7.5,
     #   height = 6,
