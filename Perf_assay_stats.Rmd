@@ -479,12 +479,56 @@ combined_performance_plot = p_nymph + p_perf +
 print(combined_performance_plot)
 
 # save to disc
-# ggsave(
-#   "./figures_performance/perf_assay_combined_nymphs.svg",
-#   plot = combined_performance_plot,
-#   width = 8, 
-#   height = 4,
-#   unit = "in"
-# )
+ggsave(
+  "./figures_performance/perf_assay_combined_nymphs.svg",
+  plot = combined_performance_plot,
+  width = 6,
+  height = 4,
+  unit = "in"
+)
+```
+
+
+Quick word tables for the total nymph model
+
+```{r}
+# saving the total nymphs coefficient tables to word doc for supp tables
+library(dplyr)
+library(broom)
+library(car)
+library(flextable) 
+library(officer)
+
+# set dir (will use existing directory if already created)
+dest_dir = file.path(getwd(), "tables_performance")
+if(!dir.exists(dest_dir)) dir.create(dest_dir)
+
+# define the variable name for titles
+var_name_nymph = "Total Nymphs"
+
+# format the tables using the Poisson model fit above
+tables_nymph = format_model_to_flextable_perf(mod_nymph_poisson)
+file_path_nymph = file.path(dest_dir, "Total_Nymphs_Assay_Results.docx")
+
+# start blank Word Document
+doc_nymph = read_docx()
+
+#  attach text titles using body_add_par, then the tables
+if(!is.null(tables_nymph$anova)) {
+  doc_nymph = body_add_par(doc_nymph, paste("Type III ANOVA:", var_name_nymph), style = "Normal")
+  doc_nymph = body_add_flextable(doc_nymph, value = tables_nymph$anova)
+  doc_nymph = body_add_par(doc_nymph, "") 
+}
+
+if(!is.null(tables_nymph$coefs)) {
+  doc_nymph = body_add_par(doc_nymph, paste("Model Coefficients:", var_name_nymph), style = "Normal")
+  doc_nymph = body_add_flextable(doc_nymph, value = tables_nymph$coefs)
+  doc_nymph = body_add_par(doc_nymph, "") 
+}
+
+# save the document
+print(doc_nymph, target = file_path_nymph)
+# debug print
+print("Successfully saved Total Nymphs Assay Word document!")
 ```
 
